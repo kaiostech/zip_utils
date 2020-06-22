@@ -1,0 +1,11 @@
+[package]
+name = "zip_utils"
+version = "0.1.0"
+authors = ["Fabrice Desré <fabrice@desre.org>"]
+edition = "2018"
+
+[dependencies]
+base64 = "0.9"
+zip = "0.4"
+ring = { git = "https://github.com/fabricedesre/ring.git", branch = "gonk" }
+untrusted = "0.6"
