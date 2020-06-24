@@ -12,5 +12,6 @@ base64 = "0.12"
 zip = { git = "ssh://git@git.kaiostech.com/rust-forks/zip-rs.git", default-features = false, features = ["deflate"]}
 ring = { git = "https://github.com/kaiostech/ring.git", branch = "gonk-0.16.12" }
 untrusted = "0.7"
-simple_asn1 = "0.4"
+simple_asn1 = "0.4.0"
 openssl = "0.10"
+chrono = "0.4"

@@ -158,7 +158,11 @@ pub fn verify_zip<P: AsRef<Path>>(path: P, cert_type: &str) -> Result<(), ZipVer
                 Err(_) => return Err(ZipVerificationError::InvalidFileList),
                 Ok(mut zipentry) => {
                     if let Some(sha1) = entry.sha1 {
-                        check_entry_digest(&mut zipentry, &digest::SHA1_FOR_LEGACY_USE_ONLY, &sha1)?;
+                        check_entry_digest(
+                            &mut zipentry,
+                            &digest::SHA1_FOR_LEGACY_USE_ONLY,
+                            &sha1,
+                        )?;
                     } else if let Some(sha256) = entry.sha256 {
                         check_entry_digest(&mut zipentry, &digest::SHA256, &sha256)?;
                     }

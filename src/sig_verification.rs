@@ -1,5 +1,5 @@
-use core::cmp::Ordering;
-use openssl::asn1::{Asn1Time, Asn1TimeRef};
+use chrono::NaiveDateTime;
+use openssl::asn1::Asn1Time;
 use openssl::x509;
 use simple_asn1::*;
 
@@ -13,6 +13,32 @@ pub struct RsaInfo {
     pub sf_alg: &'static digest::Algorithm,
 }
 
+// Given the time as string format to determine the validity
+fn check_expiry(start: &str, end: &str) -> Result<(), ZipVerificationError> {
+    if start.len() < 4 || end.len() < 4 {
+        return Err(ZipVerificationError::CertificateExpired);
+    }
+
+    // Jul  1 17:17:40 2020 GMT
+    // Jan 14 07:51:52 2017 GMT
+    let now_time = Asn1Time::days_from_now(0).unwrap();
+    let now = now_time.as_ref();
+    let now = format!("{}", now);
+
+    let start_dt = NaiveDateTime::parse_from_str(&start[..start.len() - 4], "%b%d%H:%M:%S%Y")
+        .map_err(|_| ZipVerificationError::CertificateExpired)?;
+    let end_dt = NaiveDateTime::parse_from_str(&end[..end.len() - 4], "%b%d%H:%M:%S%Y")
+        .map_err(|_| ZipVerificationError::CertificateExpired)?;
+    let now_dt = NaiveDateTime::parse_from_str(&now[..now.len() - 4], "%b%d%H:%M:%S%Y")
+        .map_err(|_| ZipVerificationError::CertificateExpired)?;
+
+    if start_dt.timestamp() > now_dt.timestamp() || end_dt.timestamp() < now_dt.timestamp() {
+        return Err(ZipVerificationError::CertificateExpired);
+    }
+
+    Ok(())
+}
+
 fn verify_cert_sig(
     certs_raw: &[Vec<u8>],
     root_cert_raw: &[u8],
@@ -24,13 +50,9 @@ fn verify_cert_sig(
 
         let root_start = cert_root.not_before();
         let root_end = cert_root.not_after();
-
-        let now = Asn1Time::days_from_now(0).unwrap();
-        let cmp_start = Asn1TimeRef::compare(&root_start, &now)?;
-        let cmp_end = Asn1TimeRef::compare(&now, &root_end)?;
-        if cmp_start != Ordering::Less || cmp_end != Ordering::Less {
-            return Err(ZipVerificationError::CertificateExpired);
-        }
+        let start = format!("{}", root_start);
+        let end = format!("{}", root_end);
+        let _ = check_expiry(&start, &end)?;
 
         let root_pub_key = cert_root.public_key()?;
         success = cert.verify(&root_pub_key)?;
@@ -498,4 +520,43 @@ fn test_other_rsa() {
     rsa_file.read_to_end(&mut rsa_raw).unwrap();
     let result = parse_rsa(&rsa_raw);
     assert!(result.is_err());
+}
+
+
+#[test]
+fn test_check_expiry() {
+    let start = "Jul  1 17:17:40 2020 GMT".into();
+    let end = "Jan 14 07:51:52 2017 GMT".into();
+    match check_expiry(start, end) {
+        Ok(_) => assert!(false),
+        Err(_) => assert!(true),
+    }
+
+    let start = "Jan 14 07:51:52 2017 GMT".into();
+    let end = "Jul  1 17:17:40 2018 GMT".into();
+    match check_expiry(start, end) {
+        Ok(_) => assert!(false),
+        Err(_) => assert!(true),
+    }
+
+    let start = "Jan 14 07:51:52 2017 GMT".into();
+    let end = "Jul  1 17:17:40 2021 GMT".into();
+    match check_expiry(start, end) {
+        Ok(_) => assert!(true),
+        Err(_) => assert!(false),
+    }
+
+    let start = "randomstring123".into();
+    let end = "".into();
+    match check_expiry(start, end) {
+        Ok(_) => assert!(false),
+        Err(_) => assert!(true),
+    }
+
+    let start = "Feb 19 00:00:00 1984 GMT".into();
+    let end = "Mar  21 11:11:11 2084 GMT".into();
+    match check_expiry(start, end) {
+        Ok(_) => assert!(true),
+        Err(_) => assert!(false),
+    }
 }
