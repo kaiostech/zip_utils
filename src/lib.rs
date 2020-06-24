@@ -6,13 +6,45 @@ extern crate untrusted;
 extern crate zip;
 
 mod manifest_parser;
+mod sig_verification;
 
 use self::manifest_parser::*;
-use ring::{digest, signature};
+use openssl::error::ErrorStack;
+use ring::digest;
+use simple_asn1::ASN1DecodeErr;
+use simple_asn1::ASN1EncodeErr;
 use std::fs::File;
+use std::io::Cursor;
 use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
+
+#[derive(PartialEq, Eq)]
+pub enum CertificateType {
+    Production,
+    Stage,
+    Test,
+}
+
+impl CertificateType {
+    pub fn as_vec(&self) -> Vec<u8> {
+        match &self {
+            Self::Production => CERT_PROD.to_vec(),
+            Self::Stage => CERT_DEV.to_vec(),
+            Self::Test => CERT_TEST.to_vec(),
+        }
+    }
+}
+
+impl From<&str> for CertificateType {
+    fn from(type_str: &str) -> Self {
+        match type_str {
+            "production" => Self::Production,
+            "stage" => Self::Stage,
+            _ => Self::Test,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ZipVerificationError {
@@ -23,6 +55,29 @@ pub enum ZipVerificationError {
     InvalidSignature,
     InvalidFileList,
     InvalidManifest,
+    InvalidRsaFileDecode(ASN1DecodeErr),
+    InvalidRsaFileEncode(ASN1EncodeErr),
+    DerefASN1Error,
+    X509Error(ErrorStack),
+    CertificateExpired,
+}
+
+impl From<simple_asn1::ASN1DecodeErr> for ZipVerificationError {
+    fn from(error: simple_asn1::ASN1DecodeErr) -> Self {
+        ZipVerificationError::InvalidRsaFileDecode(error)
+    }
+}
+
+impl From<simple_asn1::ASN1EncodeErr> for ZipVerificationError {
+    fn from(error: simple_asn1::ASN1EncodeErr) -> Self {
+        ZipVerificationError::InvalidRsaFileEncode(error)
+    }
+}
+
+impl From<openssl::error::ErrorStack> for ZipVerificationError {
+    fn from(error: openssl::error::ErrorStack) -> Self {
+        ZipVerificationError::X509Error(error)
+    }
 }
 
 // Verify the digest of a readable stream using the given algorithm and
@@ -57,7 +112,7 @@ fn check_entry_digest<R: Read>(
 }
 
 // Verifies the hashes and signature of a zip file at the given path.
-pub fn verify_zip<P: AsRef<Path>>(path: P) -> Result<(), ZipVerificationError> {
+pub fn verify_zip<P: AsRef<Path>>(path: P, cert_type: &str) -> Result<(), ZipVerificationError> {
     let file = File::open(path).map_err(|_| ZipVerificationError::NoSuchFile)?;
 
     let mut archive = ZipArchive::new(file).map_err(|_| ZipVerificationError::InvalidZip)?;
@@ -69,7 +124,7 @@ pub fn verify_zip<P: AsRef<Path>>(path: P) -> Result<(), ZipVerificationError> {
         "META-INF/zigbert.sf",
         "META-INF/manifest.mf",
     ]
-        .iter()
+    .iter()
     {
         let _ = archive
             .by_name(name)
@@ -77,7 +132,15 @@ pub fn verify_zip<P: AsRef<Path>>(path: P) -> Result<(), ZipVerificationError> {
     }
 
     // 2. Get the parsed manifest.
-    if let Ok(manifest) = read_manifest(archive.by_name("META-INF/manifest.mf").unwrap()) {
+    let mut content = Vec::new();
+    {
+        let mut file = archive.by_name("META-INF/manifest.mf").unwrap();
+        let _ = file
+            .read_to_end(&mut content)
+            .map_err(|_| ZipVerificationError::InvalidZip)?;
+    }
+    let mut cursor = Cursor::new(content);
+    if let Ok(manifest) = read_manifest(&mut cursor) {
         if manifest.version != "1.0" {
             return Err(ZipVerificationError::InvalidManifest);
         }
@@ -95,21 +158,28 @@ pub fn verify_zip<P: AsRef<Path>>(path: P) -> Result<(), ZipVerificationError> {
                 Err(_) => return Err(ZipVerificationError::InvalidFileList),
                 Ok(mut zipentry) => {
                     if let Some(sha1) = entry.sha1 {
-                        check_entry_digest(&mut zipentry, &digest::SHA1, &sha1)?;
-                    }
-                    if let Some(sha256) = entry.sha256 {
+                        check_entry_digest(&mut zipentry, &digest::SHA1_FOR_LEGACY_USE_ONLY, &sha1)?;
+                    } else if let Some(sha256) = entry.sha256 {
                         check_entry_digest(&mut zipentry, &digest::SHA256, &sha256)?;
                     }
                 }
             }
         }
 
+        let mut sf_content = Vec::new();
+        {
+            let mut file = archive.by_name("META-INF/zigbert.sf").unwrap();
+            let _ = file
+                .read_to_end(&mut sf_content)
+                .map_err(|_| ZipVerificationError::InvalidZip)?;
+        }
+        let mut sf_cursor = Cursor::new(sf_content);
         // 4. Use the META-INF/zigbert.sf to check the hash of META-INF/manifest.mf
-        match read_signature_manifest(archive.by_name("META-INF/zigbert.sf").unwrap()) {
+        match read_signature_manifest(&mut sf_cursor) {
             Ok(manifest_hash) => {
                 check_entry_digest(
                     &mut archive.by_name("META-INF/manifest.mf").unwrap(),
-                    &digest::SHA1,
+                    &digest::SHA1_FOR_LEGACY_USE_ONLY,
                     &manifest_hash,
                 )?;
             }
@@ -117,41 +187,21 @@ pub fn verify_zip<P: AsRef<Path>>(path: P) -> Result<(), ZipVerificationError> {
         }
 
         // 5. Check the signature of META-INF/zigbert.sf
-        let mut signature: Vec<u8> = Vec::new();
+        let mut rsa_file_buf: Vec<u8> = Vec::new();
         {
-            let mut signature_file = archive.by_name("META-INF/zigbert.rsa").unwrap();
-            signature_file
-                .read_to_end(&mut signature)
+            let mut rsa_file = archive.by_name("META-INF/zigbert.rsa").unwrap();
+            rsa_file
+                .read_to_end(&mut rsa_file_buf)
                 .map_err(|_| ZipVerificationError::InvalidZip)?;
         }
-        // println!("Signature size: {} bytes", signature.len());
-        let signature = untrusted::Input::from(&signature);
 
-        // TODO: include the public key differently.
-        let mut public_key_file = File::open("test-fixtures/service-center-test.crt").unwrap();
-        let mut public_key: Vec<u8> = Vec::new();
-        public_key_file
-            .read_to_end(&mut public_key)
+        let mut sf_file_buf: Vec<u8> = Vec::new();
+        let mut sf_file = archive.by_name("META-INF/zigbert.sf").unwrap();
+        sf_file
+            .read_to_end(&mut sf_file_buf)
             .map_err(|_| ZipVerificationError::InvalidZip)?;
-        let public_key = untrusted::Input::from(&public_key);
-
-        let mut message_file = archive.by_name("META-INF/zigbert.sf").unwrap();
-        let mut message: Vec<u8> = Vec::new();
-        message_file
-            .read_to_end(&mut message)
-            .map_err(|_| ZipVerificationError::InvalidZip)?;
-        let message = untrusted::Input::from(&message);
-
-        // signature::verify(
-        //     &signature::RSA_PKCS1_2048_8192_SHA256,
-        //     public_key,
-        //     message,
-        //     signature,
-        // )
-        // .map_err(|e|  {
-        //     println!("Signature verification failed: {:?}", e);
-        //     ZipVerificationError::InvalidSignature
-        // })?;
+        let root_cert = CertificateType::from(cert_type).as_vec();
+        sig_verification::verify(&rsa_file_buf, &sf_file_buf, &root_cert)?;
     } else {
         return Err(ZipVerificationError::InvalidManifest);
     }
@@ -159,8 +209,81 @@ pub fn verify_zip<P: AsRef<Path>>(path: P) -> Result<(), ZipVerificationError> {
     Ok(())
 }
 
+static CERT_TEST: &[u8] = include_bytes!("../service-center-test.crt");
+static CERT_DEV: &[u8] = include_bytes!("../service-center-dev-public.crt");
+static CERT_PROD: &[u8] = include_bytes!("../service-center-prod-public.crt");
+
+#[test]
+fn test_get_cert_type() {
+    let cert = CertificateType::from("production").as_vec();
+
+    let mut root_cert: Vec<u8> = Vec::new();
+    let mut root_cert_file = File::open("./service-center-prod-public.crt").unwrap();
+    root_cert_file.read_to_end(&mut root_cert).unwrap();
+    assert_eq!(cert, root_cert);
+
+    {
+        let cert = CertificateType::from("stage").as_vec();
+
+        let mut root_cert: Vec<u8> = Vec::new();
+        let mut root_cert_file = File::open("./service-center-dev-public.crt").unwrap();
+        root_cert_file.read_to_end(&mut root_cert).unwrap();
+        assert_eq!(cert, root_cert);
+    }
+
+    {
+        let cert = CertificateType::from("test").as_vec();
+
+        let mut root_cert: Vec<u8> = Vec::new();
+        let mut root_cert_file = File::open("./service-center-test.crt").unwrap();
+        root_cert_file.read_to_end(&mut root_cert).unwrap();
+        assert_eq!(cert, root_cert);
+    }
+}
+
 #[test]
 fn valid_zip() {
-    let result = verify_zip("test-fixtures/sample-signed.zip");
+    let result = verify_zip("test-fixtures/sample-signed.zip", "test");
+    assert!(result.is_ok());
+
+    // valid_sha256_zip
+    let result = verify_zip("test-fixtures/app_sha256.zip", "test");
+    assert!(result.is_ok());
+
+    // valid api-daemon
+    let result = verify_zip("test-fixtures/api-daemon-1.0.1.zip", "test");
+    assert!(result.is_ok());
+
+    let result = verify_zip("test-fixtures/api-daemon-1.1.2.zip", "test");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn valid_zip_2certs_in_rsa() {
+    // Stage server
+    let result = verify_zip("test-fixtures/stage.zip", "stage");
+    assert!(result.is_ok());
+
+    // Production server
+    let result = verify_zip("test-fixtures/prod.zip", "production");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_verify_mismatch() {
+    // Wrong cert
+    let result = verify_zip("test-fixtures/prod.zip", "test");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_with_long_filename() {
+    let result = verify_zip("test-fixtures/wa_stage.zip", "stage");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_longest_filename() {
+    let result = verify_zip("test-fixtures/longest_name.zip", "test");
     assert!(result.is_ok());
 }
