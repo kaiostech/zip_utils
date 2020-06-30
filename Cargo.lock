@@ -269,7 +269,7 @@ dependencies = [
 [[package]]
 name = "ring"
 version = "0.16.12"
-source = "git+https://github.com/kaiostech/ring.git?branch=gonk-0.16.12#c8e813c52df2645d1418bcb3e0553ef3119ca419"
+source = "git+https://github.com/kaiostech/ring.git?branch=gonk-0.16.12#35e35b325d9a0599881e2e1dfa38525e24c92d8d"
 dependencies = [
  "cc",
  "lazy_static",
