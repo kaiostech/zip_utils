@@ -14,7 +14,7 @@ pub struct RsaInfo {
 }
 
 fn verify_cert_sig(
-    certs_raw: &Vec<Vec<u8>>,
+    certs_raw: &[Vec<u8>],
     root_cert_raw: &[u8],
 ) -> Result<(), ZipVerificationError> {
     let mut success = false;
@@ -57,22 +57,20 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
     let vec_asn1_block = simple_asn1::from_der(&rsa_raw)?;
 
     // Sequence -> ObjectIdentifier
-    let obj1 = match &vec_asn1_block[0] {
-        &ASN1Block::Sequence(_, ref item) => item,
+    let obj1 = match vec_asn1_block[0] {
+        ASN1Block::Sequence(_, ref item) => item,
         _ => return Err(ZipVerificationError::DerefASN1Error),
     };
 
     // Sequence -> ContextSpecific
-    let obj2 = match &obj1[1] {
-        &ASN1Block::Explicit(_, _, _, ref item) => item,
+    let obj2 = match obj1[1] {
+        ASN1Block::Explicit(_, _, _, ref item) => item,
         _ => return Err(ZipVerificationError::DerefASN1Error),
     };
 
-    let obj2_unbox = *obj2.clone();
-
     // Sequence -> ContextSpecific -> Sequence []
-    let obj1_2_1 = match &obj2_unbox {
-        &ASN1Block::Sequence(_, ref item) => item,
+    let obj1_2_1 = match **obj2 {
+        ASN1Block::Sequence(_, ref item) => item,
         _ => return Err(ZipVerificationError::DerefASN1Error),
     };
 
@@ -80,13 +78,12 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
 
     // Sequence -> ContextSpecific -> Sequence -> Set -> Sequence
     let empty_v = vec![];
-    let vec1_2_1_4_0 = match &obj1_2_1[4] {
-        &ASN1Block::Set(_, ref item) => {
-            let seq = match &item[0] {
-                &ASN1Block::Sequence(_, ref seq) => seq,
+    let vec1_2_1_4_0 = match obj1_2_1[4] {
+        ASN1Block::Set(_, ref item) => {
+            match item[0] {
+                ASN1Block::Sequence(_, ref seq) => seq,
                 _ => &empty_v,
-            };
-            seq
+            }
         }
         _ => &empty_v,
     };
@@ -94,13 +91,12 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
     // Sequence -> ContextSpecific -> Sequence -> Set -> Sequence
     // For Digest algorithm
     let null_oid = simple_asn1::oid!(0);
-    let oid_alg = match &vec1_2_1_4_0[2] {
-        &ASN1Block::Sequence(_, ref seq_items) => {
-            let oid = match &seq_items[0] {
-                &ASN1Block::ObjectIdentifier(_, ref id) => id,
+    let oid_alg = match vec1_2_1_4_0[2] {
+        ASN1Block::Sequence(_, ref seq_items) => {
+            match seq_items[0] {
+                ASN1Block::ObjectIdentifier(_, ref id) => id,
                 _ => &null_oid,
-            };
-            oid
+            }
         }
         _ => &null_oid,
     };
@@ -117,8 +113,8 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
 
     // Sequence -> ContextSpecific -> Sequence -> Set -> Sequence -> ContextSpecific(Unknown)
     let null_vec = [].to_vec();
-    let vec1_2_1_4_0_3 = match &vec1_2_1_4_0[3] {
-        &ASN1Block::Unknown(_, _, _, _, ref raw) => raw,
+    let vec1_2_1_4_0_3 = match vec1_2_1_4_0[3] {
+        ASN1Block::Unknown(_, _, _, _, ref raw) => raw,
         _ => &null_vec,
     };
 
@@ -128,32 +124,30 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
 
     // For sf messageDigest
     let empty_v0 = [0].to_vec();
-    let sf_dig = match &vec_msg_dig[2] {
-        &ASN1Block::Sequence(_, ref seq_items) => {
+    let sf_dig = match vec_msg_dig[2] {
+        ASN1Block::Sequence(_, ref seq_items) => {
             let null_oid = simple_asn1::oid!(0);
-            let oid = match &seq_items[0] {
-                &ASN1Block::ObjectIdentifier(_, ref id) => id,
+            let oid = match seq_items[0] {
+                ASN1Block::ObjectIdentifier(_, ref id) => id,
                 _ => &null_oid,
             };
 
             // OBJECTIDENTIFIER 1.2.840.113549.1.9.4 (messageDigest)
             let id_msg_dig = simple_asn1::oid!(1, 2, 840, 113549, 1, 9, 4);
             if oid == id_msg_dig {
-                let digest = match &seq_items[1] {
-                    &ASN1Block::Set(_, ref set_itmes) => {
-                        if set_itmes.len() > 0 {
-                            let digest = match &set_itmes[0] {
-                                &ASN1Block::OctetString(_, ref msg) => msg,
+                match seq_items[1] {
+                    ASN1Block::Set(_, ref set_itmes) => {
+                        if !set_itmes.is_empty() {
+                            match set_itmes[0] {
+                                ASN1Block::OctetString(_, ref msg) => msg,
                                 _ => &empty_v0,
-                            };
-                            digest
+                            }
                         } else {
                             &empty_v0
                         }
                     }
                     _ => &empty_v0,
-                };
-                digest
+                }
             } else {
                 &empty_v0
             }
@@ -169,20 +163,20 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
     Ok(rsa_info)
 }
 
-fn parse_cert(blocks: &Vec<ASN1Block>) -> Result<Vec<Vec<u8>>, ZipVerificationError> {
+fn parse_cert(blocks: &[ASN1Block]) -> Result<Vec<Vec<u8>>, ZipVerificationError> {
     // Sequence -> ContextSpecific -> Sequence -> ContextSpecific
     if blocks.len() < 4 {
         return Err(ZipVerificationError::DerefASN1Error);
     }
 
     let mut certs_vec = vec![];
-    match &blocks[3] {
-        &ASN1Block::Explicit(_, _, _, ref item) => {
+    match blocks[3] {
+        ASN1Block::Explicit(_, _, _, ref item) => {
             let item_unbox = *item.clone();
             let cert = simple_asn1::to_der(&item_unbox)?;
             certs_vec.push(cert);
         }
-        &ASN1Block::Unknown(_, _, _, _, ref raw) => {
+        ASN1Block::Unknown(_, _, _, _, ref raw) => {
             let seqs = simple_asn1::from_der(&raw)?;
             for cert in seqs {
                 let cert_raw = simple_asn1::to_der(&cert)?;
@@ -209,7 +203,7 @@ fn verify_sf_sig(
     context.update(&sf_raw);
     let sf_dig_calc = context.finish();
 
-    if &sf_dig != &sf_dig_calc.as_ref() {
+    if sf_dig != sf_dig_calc.as_ref() {
         return Err(ZipVerificationError::InvalidSignature);
     }
 

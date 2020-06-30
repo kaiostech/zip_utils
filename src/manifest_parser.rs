@@ -11,7 +11,7 @@
 //!
 //! ... other file entries
 
-use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
+use std::io::{BufRead, Seek, SeekFrom};
 
 // We hardcode support for sha1 and sha256 only.
 #[derive(Clone)]
@@ -46,9 +46,8 @@ fn parse_new_line<B: BufRead + Seek>(cur: &mut B) -> Result<(String, String), ()
         if buf.len() > 72 && buf.starts_with("Name: ") {
             parse_name = true;
             buf_all.push_str(&buf[..buf.len() - 1]);
-        } else if buf.starts_with(" ") && parse_name {
+        } else if buf.starts_with(' ') && parse_name {
             // The following line starts with " "
-            parse_name = false;
             buf_all.push_str(&buf[1..buf.len() - 1]);
             break;
         } else if parse_name {
@@ -56,7 +55,6 @@ fn parse_new_line<B: BufRead + Seek>(cur: &mut B) -> Result<(String, String), ()
             // We pre-read new line to know if the file name
             // longer than 66. If not, we set cursor back for next round
             cur.seek(SeekFrom::Start(current as u64)).unwrap();
-            parse_name = false;
             break;
         } else {
             // Do nothing
@@ -170,6 +168,7 @@ pub fn read_signature_manifest<B: BufRead + Seek>(mut cur: &mut B) -> Result<Str
 #[test]
 fn hash_manifest() {
     use std::fs::File;
+    use std::io::{Cursor, Read};
 
     let mut file = File::open("test-fixtures/manifest.mf").unwrap();
     let mut content = Vec::new();
@@ -190,6 +189,7 @@ fn hash_manifest() {
 #[test]
 fn hash_manifest_long_file_name() {
     use std::fs::File;
+    use std::io::{Cursor, Read};
 
     let mut file = File::open("test-fixtures/long_name_manifest.mf").unwrap();
     let mut content = Vec::new();
@@ -217,6 +217,7 @@ fn hash_manifest_long_file_name() {
 #[test]
 fn hash_manifest_long_file_name_73() {
     use std::fs::File;
+    use std::io::{Cursor, Read};
 
     let mut file = File::open("test-fixtures/manifest_73.mf").unwrap();
     let mut content = Vec::new();
@@ -247,6 +248,7 @@ fn hash_manifest_long_file_name_73() {
 #[test]
 fn hash_manifest_longest_file_name() {
     use std::fs::File;
+    use std::io::{Cursor, Read};
 
     let mut file = File::open("test-fixtures/manifest_longest.mf").unwrap();
     let mut content = Vec::new();
@@ -288,6 +290,7 @@ fn hash_manifest_longest_file_name() {
 #[test]
 fn signature_manifest() {
     use std::fs::File;
+    use std::io::{Cursor, Read};
 
     let mut file = File::open("test-fixtures/zigbert.sf").unwrap();
     let mut content = Vec::new();
