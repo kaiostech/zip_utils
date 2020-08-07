@@ -1,10 +1,8 @@
-use chrono::NaiveDateTime;
-use openssl::asn1::Asn1Time;
-use openssl::x509;
-use simple_asn1::*;
-
 use crate::ZipVerificationError;
 use ring::digest;
+use simple_asn1::*;
+use std::time::SystemTime;
+use x509_signature::*;
 
 #[derive(Debug)]
 pub struct RsaInfo {
@@ -13,60 +11,31 @@ pub struct RsaInfo {
     pub sf_alg: &'static digest::Algorithm,
 }
 
-// Given the time as string format to determine the validity
-fn check_expiry(start: &str, end: &str) -> Result<(), ZipVerificationError> {
-    if start.len() < 4 || end.len() < 4 {
-        return Err(ZipVerificationError::CertificateExpired);
-    }
-
-    // Jul  1 17:17:40 2020 GMT
-    // Jan 14 07:51:52 2017 GMT
-    let now_time = Asn1Time::days_from_now(0).unwrap();
-    let now = now_time.as_ref();
-    let now = format!("{}", now);
-
-    let start_dt = NaiveDateTime::parse_from_str(&start[..start.len() - 4], "%b%d%H:%M:%S%Y")
-        .map_err(|_| ZipVerificationError::CertificateExpired)?;
-    let end_dt = NaiveDateTime::parse_from_str(&end[..end.len() - 4], "%b%d%H:%M:%S%Y")
-        .map_err(|_| ZipVerificationError::CertificateExpired)?;
-    let now_dt = NaiveDateTime::parse_from_str(&now[..now.len() - 4], "%b%d%H:%M:%S%Y")
-        .map_err(|_| ZipVerificationError::CertificateExpired)?;
-
-    if start_dt.timestamp() > now_dt.timestamp() || end_dt.timestamp() < now_dt.timestamp() {
-        return Err(ZipVerificationError::CertificateExpired);
-    }
-
-    Ok(())
-}
-
 fn verify_cert_sig(
     certs_raw: &[Vec<u8>],
     root_cert_raw: &[u8],
 ) -> Result<(), ZipVerificationError> {
-    let mut success = false;
+    let root_certificate =
+        parse_certificate(&root_cert_raw).map_err(ZipVerificationError::X509Signature)?;
+    // Check root certificate validity date.
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(now) => {
+            let _ = root_certificate.valid_at_timestamp(now.as_secs() as i64)?;
+        }
+        Err(_) => return Err(ZipVerificationError::CertificateExpired),
+    }
+
     for cert_raw in certs_raw {
-        let cert = x509::X509::from_der(&cert_raw)?;
-        let cert_root = openssl::x509::X509::from_der(&root_cert_raw)?;
+        let cert = parse_certificate(&cert_raw).map_err(ZipVerificationError::X509Signature)?;
 
-        let root_start = cert_root.not_before();
-        let root_end = cert_root.not_after();
-        let start = format!("{}", root_start);
-        let end = format!("{}", root_end);
-        let _ = check_expiry(&start, &end)?;
-
-        let root_pub_key = cert_root.public_key()?;
-        success = cert.verify(&root_pub_key)?;
-
-        if success {
-            break;
+        // Check that the certificate is signed properly.
+        if let Ok(()) = cert.check_signature_from(&root_certificate) {
+            return Ok(());
         }
     }
 
-    if !success {
-        return Err(ZipVerificationError::InvalidSignature);
-    }
-
-    Ok(())
+    // No valid certificate found, returning generic error.
+    Err(ZipVerificationError::InvalidSignature)
 }
 
 fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
@@ -101,12 +70,10 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
     // Sequence -> ContextSpecific -> Sequence -> Set -> Sequence
     let empty_v = vec![];
     let vec1_2_1_4_0 = match obj1_2_1[4] {
-        ASN1Block::Set(_, ref item) => {
-            match item[0] {
-                ASN1Block::Sequence(_, ref seq) => seq,
-                _ => &empty_v,
-            }
-        }
+        ASN1Block::Set(_, ref item) => match item[0] {
+            ASN1Block::Sequence(_, ref seq) => seq,
+            _ => &empty_v,
+        },
         _ => &empty_v,
     };
 
@@ -114,12 +81,10 @@ fn parse_rsa(rsa_raw: &[u8]) -> Result<RsaInfo, ZipVerificationError> {
     // For Digest algorithm
     let null_oid = simple_asn1::oid!(0);
     let oid_alg = match vec1_2_1_4_0[2] {
-        ASN1Block::Sequence(_, ref seq_items) => {
-            match seq_items[0] {
-                ASN1Block::ObjectIdentifier(_, ref id) => id,
-                _ => &null_oid,
-            }
-        }
+        ASN1Block::Sequence(_, ref seq_items) => match seq_items[0] {
+            ASN1Block::ObjectIdentifier(_, ref id) => id,
+            _ => &null_oid,
+        },
         _ => &null_oid,
     };
 
@@ -520,43 +485,4 @@ fn test_other_rsa() {
     rsa_file.read_to_end(&mut rsa_raw).unwrap();
     let result = parse_rsa(&rsa_raw);
     assert!(result.is_err());
-}
-
-
-#[test]
-fn test_check_expiry() {
-    let start = "Jul  1 17:17:40 2020 GMT".into();
-    let end = "Jan 14 07:51:52 2017 GMT".into();
-    match check_expiry(start, end) {
-        Ok(_) => assert!(false),
-        Err(_) => assert!(true),
-    }
-
-    let start = "Jan 14 07:51:52 2017 GMT".into();
-    let end = "Jul  1 17:17:40 2018 GMT".into();
-    match check_expiry(start, end) {
-        Ok(_) => assert!(false),
-        Err(_) => assert!(true),
-    }
-
-    let start = "Jan 14 07:51:52 2017 GMT".into();
-    let end = "Jul  1 17:17:40 2021 GMT".into();
-    match check_expiry(start, end) {
-        Ok(_) => assert!(true),
-        Err(_) => assert!(false),
-    }
-
-    let start = "randomstring123".into();
-    let end = "".into();
-    match check_expiry(start, end) {
-        Ok(_) => assert!(false),
-        Err(_) => assert!(true),
-    }
-
-    let start = "Feb 19 00:00:00 1984 GMT".into();
-    let end = "Mar  21 11:11:11 2084 GMT".into();
-    match check_expiry(start, end) {
-        Ok(_) => assert!(true),
-        Err(_) => assert!(false),
-    }
 }

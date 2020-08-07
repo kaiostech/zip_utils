@@ -9,7 +9,6 @@ mod manifest_parser;
 mod sig_verification;
 
 use self::manifest_parser::*;
-use openssl::error::ErrorStack;
 use ring::digest;
 use simple_asn1::ASN1DecodeErr;
 use simple_asn1::ASN1EncodeErr;
@@ -58,8 +57,8 @@ pub enum ZipVerificationError {
     InvalidRsaFileDecode(ASN1DecodeErr),
     InvalidRsaFileEncode(ASN1EncodeErr),
     DerefASN1Error,
-    X509Error(ErrorStack),
     CertificateExpired,
+    X509Signature(x509_signature::Error),
 }
 
 impl From<simple_asn1::ASN1DecodeErr> for ZipVerificationError {
@@ -74,9 +73,9 @@ impl From<simple_asn1::ASN1EncodeErr> for ZipVerificationError {
     }
 }
 
-impl From<openssl::error::ErrorStack> for ZipVerificationError {
-    fn from(error: openssl::error::ErrorStack) -> Self {
-        ZipVerificationError::X509Error(error)
+impl From<x509_signature::Error> for ZipVerificationError {
+    fn from(error: x509_signature::Error) -> Self {
+        ZipVerificationError::X509Signature(error)
     }
 }
 
