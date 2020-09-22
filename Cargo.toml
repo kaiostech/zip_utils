@@ -6,7 +6,7 @@ edition = "2018"
 
 [dependencies]
 base64 = "0.12"
-zip = { git = "ssh://git@git.kaiostech.com/rust-forks/zip-rs.git", default-features = false, features = ["deflate"]}
+zip = { git = "ssh://git@git.kaiostech.com/rust-forks/zip-rs.git", branch="omni-ja", default-features = false, features = ["deflate", "omnija"]}
 ring = "0.16"
 untrusted = "0.7"
 simple_asn1 = "0.4.0"
